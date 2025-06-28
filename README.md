@@ -16,9 +16,6 @@ Dado que el paper original no publica su dataset, se optó por utilizar el clás
 - `fuzzy.py`  
   Implementa la versión con inferencia difusa inspirada en el paper.
 
-- `tarea3.py`  
-  Implementa un modelo Naive Bayes tradicional como baseline para comparar.
-
 - `spam.csv`  
   Dataset de SMS públicos con etiquetado ham/spam, usado para entrenar y evaluar ambos modelos.
 
