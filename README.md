@@ -23,4 +23,12 @@ Dado que el paper original no publica su dataset, se optó por utilizar el clás
 
 Se lograron resultados sólidos en términos de precisión y recall, confirmando que los métodos de inferencia difusa pueden mejorar la robustez de la clasificación frente a técnicas tradicionales, especialmente al manejar incertidumbre en datos de texto.
 
----
+## Justificación del dataset
+
+Se decidió emplear `spam.csv` ya que:
+- el dataset original del artículo no se encuentra publicado,
+- `spam.csv` cuenta con alta validación académica y es ampliamente referenciado,
+- su formato (mensajes + etiquetas binaria ham/spam) es compatible con la metodología de inferencia difusa,
+- permite replicar de forma consistente el problema de clasificación descrito en el paper.
+
+Esto respalda la validez de los resultados obtenidos y facilita futuras comparaciones y extensiones.
