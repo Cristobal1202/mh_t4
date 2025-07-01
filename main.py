@@ -6,7 +6,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.mode == "baseline":
-        from experiments.run_experiments import run_baseline
+        from run_experiments import run_baseline
         run_baseline(args.algo)
     elif args.mode == "tuning":
         from tuning.tuning_boa import run_tuning  # ejemplo
