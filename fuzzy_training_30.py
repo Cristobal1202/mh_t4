@@ -1,234 +1,349 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, KFold
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    accuracy_score, recall_score, precision_score, f1_score,
-    classification_report, confusion_matrix
-)
+from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score
 import random
-from collections import deque
+from collections import deque, defaultdict
+import warnings
+from src.optimizers.boa import butterfly_optimization
+from src.optimizers.hc import hill_climbing
+from src.optimizers.sa import simulated_annealing
+from src.optimizers.ts import tabu_search
 
-# ----------------------------
-# Cargar y preparar datos
-# ----------------------------
-df = pd.read_csv("training.csv")
+# --- Ignorar advertencias para una salida más limpia ---
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
-print("Columnas cargadas:", df.columns.tolist())
 
-# Corregir la clase: -1 a 0
-df['Result'] = df['Result'].replace(-1, 0)
+# -------------------------------------
+# 1. Cargar y Preparar los Datos
+# -------------------------------------
+try:
+    df = pd.read_csv("training.csv")
+except FileNotFoundError:
+    print("Error: 'training.csv' no encontrado. Por favor, asegúrese de que el archivo esté en el directorio correcto.")
+    exit()
 
-# Verificar valores
-if df['Result'].isna().any():
-    raise ValueError("La columna Result tiene valores nulos o desconocidos")
+# Mapear la variable objetivo: -1 -> 0, 1 -> 1 (no filtrar -1)
+df['Result'] = df['Result'].map({1: 1, -1: 0})
 
-# Separar variables y etiquetas
 X = df.drop(columns=["Result"])
 y = df["Result"]
 
-# Split
+# División única de datos para asegurar que todos los algoritmos se prueben en el mismo conjunto
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y
+    X, y, test_size=0.2, random_state=42
 )
 
-# ----------------------------
-# Evaluación de máscara
-# ----------------------------
-def feature_eval(X_train, X_test, y_train, y_test, mask):
-    selected_features = X_train.columns[mask == 1]
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+# Información del dataset
+print(f"Dataset cargado: {len(df)} muestras")
+print(f"Características: {len(X.columns)} features")
+print(f"Distribución de clases: {y.value_counts().to_dict()}")
+print(f"Primeras 5 características: {list(X.columns[:5])}")
+print(f"Últimas 5 características: {list(X.columns[-5:])}")
+
+# -------------------------------------
+# 2. Configuración de la Comparación Rigurosa
+# -------------------------------------
+N_RUNS = 3
+MAX_EVALUATIONS = 100
+POP_SIZE_BOA = 250
+
+# Parámetros optimizados de BOA encontrados por irace
+TUNED_BOA_PARAMS = {
+    'sensory_modality': 0.0997,
+    'power_exponent': 0.3619,
+    'switch_prob': 0.6418
+}
+
+print(f"Configuración: {N_RUNS} ejecuciones, {MAX_EVALUATIONS} evaluaciones, población BOA: {POP_SIZE_BOA}")
+
+# -------------------------------------
+# 3. Función de Evaluación (Fitness)
+# -------------------------------------
+
+def feature_eval(mask, X_train, X_test, y_train, y_test):
+    selected_features = X_train.columns[np.array(mask, dtype=bool)]
     if len(selected_features) == 0:
         return 0.0
-    clf = LogisticRegression(max_iter=200)
+    clf = LogisticRegression(max_iter=200, solver='liblinear')
     clf.fit(X_train[selected_features], y_train)
     preds = clf.predict(X_test[selected_features])
     return accuracy_score(y_test, preds)
 
-# ----------------------------
-# Simulated Annealing
-# ----------------------------
-def simulated_annealing(max_iter=1000, initial_temp=1.0, cooling_rate=0.995):
+# -------------------------------------
+# 4. Wrapper functions for imported metaheuristics with normalized fitness tracking
+# -------------------------------------
+
+def normalize_fitness_history(history):
+    """Normalize fitness history to start from 0 and show relative improvement"""
+    if not history or len(history) == 0:
+        return history
+    
+    # Convert to numpy array for easier manipulation
+    hist_array = np.array(history)
+    initial_fitness = hist_array[0]
+    
+    # Calculate improvement from initial fitness
+    normalized_history = hist_array - initial_fitness
+    
+    return normalized_history.tolist()
+
+def sa_wrapper(X_train, X_test, y_train, y_test, max_evals, **kwargs):
+    """Wrapper for simulated annealing"""
+    def objective_func(mask):
+        # Convert continuous values to binary mask
+        binary_mask = np.round(np.clip(mask, 0, 1)).astype(int)
+        return feature_eval(binary_mask, X_train, X_test, y_train, y_test)
+    
     n_features = X_train.shape[1]
-    current_mask = np.ones(n_features, dtype=int)
-    best_mask = current_mask.copy()
-    best_score = feature_eval(X_train, X_test, y_train, y_test, current_mask)
-    current_score = best_score
-    temp = initial_temp
-    history = [best_score]
+    sa = simulated_annealing(
+        obj_function=objective_func,
+        dim=n_features,
+        lower_bound=0.0,
+        upper_bound=1.0,
+        max_iter=max_evals,
+        **kwargs
+    )
+    best_solution, best_fitness, history = sa.optimize()
+    best_mask = np.round(np.clip(best_solution, 0, 1)).astype(int)
+    
+    # Normalize fitness history to start from 0
+    normalized_history = normalize_fitness_history(history)
+    
+    return best_mask, best_fitness, normalized_history
 
-    for iter in range(max_iter):
-        candidate_mask = current_mask.copy()
-        flip = random.randint(0, n_features - 1)
-        candidate_mask[flip] = 1 - candidate_mask[flip]
-        candidate_score = feature_eval(X_train, X_test, y_train, y_test, candidate_mask)
+def hc_wrapper(X_train, X_test, y_train, y_test, max_evals, **kwargs):
+    """Wrapper for hill climbing"""
+    hc = hill_climbing(max_iter=max_evals, **kwargs)
+    best_mask, best_fitness, history = hc.optimize(X_train, y_train)
+    
+    # Normalize fitness history to start from 0
+    normalized_history = normalize_fitness_history(history)
+    
+    return best_mask, best_fitness, normalized_history
 
-        if candidate_score > current_score:
-            current_mask = candidate_mask
-            current_score = candidate_score
-            if candidate_score > best_score:
-                best_score = candidate_score
-                best_mask = candidate_mask
+def ts_wrapper(X_train, X_test, y_train, y_test, max_evals, **kwargs):
+    """Wrapper for tabu search"""
+    ts = tabu_search(max_iter=max_evals, **kwargs)
+    best_mask, best_fitness, history = ts.run(X_train, y_train)
+    
+    # Normalize fitness history to start from 0
+    normalized_history = normalize_fitness_history(history)
+    
+    return best_mask, best_fitness, normalized_history
+
+def boa_wrapper(X_train, X_test, y_train, y_test, max_iter, pop_size, **kwargs):
+    """Wrapper for BOA with optimized parameters from irace tuning"""
+    def objective_func(mask):
+        # Convert continuous values to binary mask
+        binary_mask = np.round(np.clip(mask, 0, 1)).astype(int)
+        return feature_eval(binary_mask, X_train, X_test, y_train, y_test)
+    
+    n_features = X_train.shape[1]
+    
+    # Use tuned parameters instead of defaults
+    boa = butterfly_optimization(
+        obj_function=objective_func,
+        dim=n_features,
+        lower_bound=0.0,
+        upper_bound=1.0,
+        max_iter=max_iter,
+        pop_size=pop_size,
+        sensory_modality=TUNED_BOA_PARAMS['sensory_modality'],
+        power_exponent=TUNED_BOA_PARAMS['power_exponent'],
+        switch_prob=TUNED_BOA_PARAMS['switch_prob'],
+        **kwargs
+    )
+    best_solution, best_fitness = boa.optimize()
+    history = boa.get_fitness_history()
+    best_mask = np.round(np.clip(best_solution, 0, 1)).astype(int)
+    
+    # Normalize fitness history to start from 0
+    normalized_history = normalize_fitness_history(history)
+    
+    return best_mask, best_fitness, normalized_history
+
+
+# -------------------------------------
+# 5. Bucle de Ejecución y Recolección de Resultados
+# -------------------------------------
+results = defaultdict(lambda: defaultdict(list))
+algorithms = {
+    "SA": sa_wrapper,
+    "HC": hc_wrapper,
+    "TS": ts_wrapper,
+    "BOA": boa_wrapper
+}
+
+print("Iniciando comparación rigurosa de metaheurísticas...")
+
+for fold_idx, (train_index, test_index) in enumerate(kf.split(X)):
+    print(f"\n--- KFold {fold_idx + 1}/{kf.get_n_splits()} ---")
+    X_train_kf, X_test_kf = X.iloc[train_index], X.iloc[test_index]
+    y_train_kf, y_test_kf = y.iloc[train_index], y.iloc[test_index]
+    
+    for name, algorithm in algorithms.items():
+        print(f"Algoritmo: {name}")
+        
+        # Ejecutar múltiples veces por cada fold
+        for run in range(N_RUNS):
+            if name == "BOA":
+                result = algorithm(
+                    X_train_kf, X_test_kf, y_train_kf, y_test_kf,
+                    max_iter=MAX_EVALUATIONS // POP_SIZE_BOA,
+                    pop_size=POP_SIZE_BOA
+                )
+            else:
+                result = algorithm(
+                    X_train_kf, X_test_kf, y_train_kf, y_test_kf,
+                    max_evals=MAX_EVALUATIONS
+                )
+
+            # Extract results (format may vary from imported functions)
+            if isinstance(result, tuple) and len(result) >= 3:
+                best_mask, best_fitness, history = result[:3]
+            else:
+                # Handle case where imported function returns different format
+                best_mask = result if not isinstance(result, tuple) else result[0]
+                best_fitness = 0
+                history = [0] * MAX_EVALUATIONS
+
+            # Ensure best_mask is binary
+            if hasattr(best_mask, '__iter__'):
+                best_mask = np.array(best_mask, dtype=int)
+            else:
+                # If single value, create random mask as fallback
+                best_mask = np.random.randint(0, 2, X_train_kf.shape[1])
+
+            # Guardar historial
+            results[name]["histories"].append(history)
+
+            # Calcular métricas finales
+            selected_features = X_train_kf.columns[np.array(best_mask, dtype=bool)]
+            if len(selected_features) > 0:
+                clf = LogisticRegression(max_iter=200, solver='liblinear')
+                clf.fit(X_train_kf[selected_features], y_train_kf)
+                final_preds = clf.predict(X_test_kf[selected_features])
+                results[name]["metrics"].append({
+                    "accuracy": accuracy_score(y_test_kf, final_preds),
+                    "recall": recall_score(y_test_kf, final_preds),
+                    "precision": precision_score(y_test_kf, final_preds),
+                    "f1": f1_score(y_test_kf, final_preds)
+                })
+            else:
+                results[name]["metrics"].append({
+                    "accuracy": 0, "recall": 0, "precision": 0, "f1": 0
+                })
+
+
+# -------------------------------------
+# 6. Procesamiento y Presentación de Resultados
+# -------------------------------------
+summary_data = []
+for name in algorithms.keys():
+    metrics_df = pd.DataFrame(results[name]["metrics"])
+    mean_metrics = metrics_df.mean()
+    std_metrics = metrics_df.std()
+    summary_data.append({
+        "Algorithm": name,
+        "Avg. Accuracy": f"{mean_metrics['accuracy']:.4f} ± {std_metrics['accuracy']:.4f}",
+        "Avg. F1-Score": f"{mean_metrics['f1']:.4f} ± {std_metrics['f1']:.4f}",
+        "Avg. Precision": f"{mean_metrics['precision']:.4f} ± {std_metrics['precision']:.4f}",
+        "Avg. Recall": f"{mean_metrics['recall']:.4f} ± {std_metrics['recall']:.4f}",
+    })
+    results[name]["avg_metrics"] = mean_metrics # Guardar para el gráfico de radar
+
+summary_df = pd.DataFrame(summary_data)
+print("\n=== Resumen de Rendimiento Promedio (10 Ejecuciones) ===")
+print(summary_df.to_string(index=False))
+
+# -------------------------------------
+# 7. Gráfico de Evolución Promedio con Desviación Estándar
+# -------------------------------------
+plt.figure(figsize=(12, 7))
+colors = {"SA": "blue", "HC": "green", "TS": "orange", "BOA": "red"}
+
+for name in algorithms.keys():
+    histories_list = results[name]["histories"]
+    
+    # Ensure all histories have the same length by padding or truncating
+    max_length = MAX_EVALUATIONS
+    normalized_histories = []
+    
+    for history in histories_list:
+        if len(history) < max_length:
+            # Pad with the last value
+            padded_history = list(history) + [history[-1]] * (max_length - len(history))
+        elif len(history) > max_length:
+            # Truncate to max_length
+            padded_history = history[:max_length]
         else:
-            prob = np.exp((candidate_score - current_score) / temp)
-            if random.random() < prob:
-                current_mask = candidate_mask
-                current_score = candidate_score
-        temp *= cooling_rate
-        history.append(best_score)
+            padded_history = history
+        normalized_histories.append(padded_history)
+    
+    # Convert to numpy array now that all histories have the same length
+    histories = np.array(normalized_histories)
+    mean_history = histories.mean(axis=0)
+    std_history = histories.std(axis=0)
+    
+    # Create evaluation steps
+    evals = np.arange(len(mean_history))
+    
+    plt.plot(evals, mean_history, label=name, color=colors[name], linewidth=2)
+    plt.fill_between(evals, mean_history - std_history, mean_history + std_history,
+                     color=colors[name], alpha=0.15)
 
-        if iter % 100 == 0:
-            print(f"[SA] Iter {iter}, Best Acc: {best_score:.4f}")
-    return best_mask, best_score, history
-
-# ----------------------------
-# Hill Climbing
-# ----------------------------
-def hill_climbing(max_iter=1000):
-    n_features = X_train.shape[1]
-    current_mask = np.ones(n_features, dtype=int)
-    best_mask = current_mask.copy()
-    best_score = feature_eval(X_train, X_test, y_train, y_test, current_mask)
-    history = [best_score]
-
-    for iter in range(max_iter):
-        candidate_mask = current_mask.copy()
-        flip = random.randint(0, n_features - 1)
-        candidate_mask[flip] = 1 - candidate_mask[flip]
-        candidate_score = feature_eval(X_train, X_test, y_train, y_test, candidate_mask)
-
-        if candidate_score >= best_score:
-            current_mask = candidate_mask
-            best_score = candidate_score
-            best_mask = candidate_mask
-        history.append(best_score)
-
-        if iter % 100 == 0:
-            print(f"[HC] Iter {iter}, Best Acc: {best_score:.4f}")
-    return best_mask, best_score, history
-
-# ----------------------------
-# Tabu Search
-# ----------------------------
-def tabu_search(max_iter=1000, tabu_size=50):
-    n_features = X_train.shape[1]
-    current_mask = np.ones(n_features, dtype=int)
-    best_mask = current_mask.copy()
-    best_score = feature_eval(X_train, X_test, y_train, y_test, current_mask)
-    tabu_list = deque(maxlen=tabu_size)
-    history = [best_score]
-
-    for iter in range(max_iter):
-        candidate_mask = current_mask.copy()
-        flip = random.randint(0, n_features - 1)
-        candidate_mask[flip] = 1 - candidate_mask[flip]
-
-        if tuple(candidate_mask) in tabu_list:
-            continue
-
-        candidate_score = feature_eval(X_train, X_test, y_train, y_test, candidate_mask)
-
-        if candidate_score > best_score:
-            best_score = candidate_score
-            best_mask = candidate_mask
-            current_mask = candidate_mask
-        else:
-            current_mask = candidate_mask
-
-        tabu_list.append(tuple(candidate_mask))
-        history.append(best_score)
-
-        if iter % 100 == 0:
-            print(f"[TS] Iter {iter}, Best Acc: {best_score:.4f}")
-    return best_mask, best_score, history
-
-# ----------------------------
-# Ejecutar
-# ----------------------------
-print("\n=== SA ===")
-sa_mask, sa_acc, sa_history = simulated_annealing()
-print("\n=== HC ===")
-hc_mask, hc_acc, hc_history = hill_climbing()
-print("\n=== TS ===")
-ts_mask, ts_acc, ts_history = tabu_search()
-
-# ----------------------------
-# Métricas finales
-# ----------------------------
-clf = LogisticRegression(max_iter=200)
-
-# SA
-clf.fit(X_train[X_train.columns[sa_mask == 1]], y_train)
-sa_pred = clf.predict(X_test[X_test.columns[sa_mask == 1]])
-sa_metrics = {
-    "accuracy": accuracy_score(y_test, sa_pred),
-    "recall": recall_score(y_test, sa_pred),
-    "precision": precision_score(y_test, sa_pred),
-    "f1": f1_score(y_test, sa_pred)
-}
-
-# HC
-clf.fit(X_train[X_train.columns[hc_mask == 1]], y_train)
-hc_pred = clf.predict(X_test[X_test.columns[hc_mask == 1]])
-hc_metrics = {
-    "accuracy": accuracy_score(y_test, hc_pred),
-    "recall": recall_score(y_test, hc_pred),
-    "precision": precision_score(y_test, hc_pred),
-    "f1": f1_score(y_test, hc_pred)
-}
-
-# TS
-clf.fit(X_train[X_train.columns[ts_mask == 1]], y_train)
-ts_pred = clf.predict(X_test[X_test.columns[ts_mask == 1]])
-ts_metrics = {
-    "accuracy": accuracy_score(y_test, ts_pred),
-    "recall": recall_score(y_test, ts_pred),
-    "precision": precision_score(y_test, ts_pred),
-    "f1": f1_score(y_test, ts_pred)
-}
-
-print("\n=== Métricas finales ===")
-print(f"SA: {sa_metrics}")
-print(f"HC: {hc_metrics}")
-print(f"TS: {ts_metrics}")
-
-# ----------------------------
-# Graficar convergencia
-# ----------------------------
-plt.figure(figsize=(10, 6))
-plt.plot(sa_history, label="Simulated Annealing", color="blue", linewidth=2)
-plt.plot(hc_history, label="Hill Climbing", color="green", linewidth=2)
-plt.plot(ts_history, label="Tabu Search", color="orange", linewidth=2)
-plt.xlabel("Iteration")
-plt.ylabel("Fitness (Accuracy)")
-plt.title("Convergence of Metaheuristics on Training Dataset")
-plt.legend()
+plt.xlabel("Número de Evaluaciones de Fitness")
+plt.ylabel("Mejora de Fitness (Relativa al Inicio)")
+plt.title("Evolución de Mejora de Fitness - Training Dataset (30 características)")
+plt.legend(loc='upper left')
 plt.grid(True, linestyle="--", alpha=0.7)
+plt.xlim(0, MAX_EVALUATIONS)
+plt.ylim(bottom=0)  # Start from 0 to show relative improvement
 plt.tight_layout()
 plt.show()
 
-# ----------------------------
-# Radar chart
-# ----------------------------
-labels = ["accuracy", "recall", "precision", "f1"]
-num_vars = len(labels)
-angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
-angles += angles[:1]
 
-sa_values = list(sa_metrics.values()) + [sa_metrics["accuracy"]]
-hc_values = list(hc_metrics.values()) + [hc_metrics["accuracy"]]
-ts_values = list(ts_metrics.values()) + [ts_metrics["accuracy"]]
+# -------------------------------------
+# 8. Gráfico de Radar con Métricas Promedio
+# -------------------------------------
+metrics_labels = ["accuracy", "recall", "precision", "f1"]
+metric_names = ["Accuracy", "Recall", "Precision", "F1-Score"]
+algorithms_list = list(algorithms.keys())
+num_algorithms = len(algorithms_list)
+angles = np.linspace(0, 2 * np.pi, num_algorithms, endpoint=False).tolist()
+angles += angles[:1]  # cerrar el radar
 
+# Preparar datos: una lista por cada métrica
+metric_data = {metric: [] for metric in metrics_labels}
+for metric in metrics_labels:
+    for alg in algorithms_list:
+        avg_value = results[alg]["avg_metrics"][metric]
+        metric_data[metric].append(avg_value)
+    metric_data[metric].append(metric_data[metric][0])  # cerrar el círculo
+
+# Graficar
 fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(polar=True))
-ax.plot(angles, sa_values, color="blue", linewidth=2.5, marker='o', label="SA")
-ax.fill(angles, sa_values, color="blue", alpha=0.15)
-ax.plot(angles, hc_values, color="green", linewidth=2.5, marker='s', label="HC")
-ax.fill(angles, hc_values, color="green", alpha=0.15)
-ax.plot(angles, ts_values, color="orange", linewidth=2.5, marker='^', label="TS")
-ax.fill(angles, ts_values, color="orange", alpha=0.15)
-ax.set_thetagrids(np.degrees(angles[:-1]), labels)
-ax.set_ylim(0, 1)
-ax.set_title("Metaheuristic Performance Radar Chart on Training Dataset")
+
+colors_metric = {
+    "accuracy": "blue",
+    "recall": "green",
+    "precision": "orange",
+    "f1": "red"
+}
+
+for metric, color in colors_metric.items():
+    ax.plot(angles, metric_data[metric], label=metric.capitalize(), color=color, linewidth=2, marker='o')
+    ax.fill(angles, metric_data[metric], color=color, alpha=0.15)
+
+ax.set_thetagrids(np.degrees(angles[:-1]), algorithms_list, fontsize=12)
+ax.set_ylim(0, 1.0)
+ax.set_title("Comparación de Métricas por Metaheurística - Training Dataset", fontsize=16, pad=20)
 ax.legend(loc="upper right", bbox_to_anchor=(1.3, 1.1))
 plt.tight_layout()
 plt.show()

@@ -45,7 +45,14 @@ kf = KFold(n_splits=5, shuffle=True, random_state=42)
 # -------------------------------------
 N_RUNS = 10  # Número de ejecuciones para promediar resultados
 MAX_EVALUATIONS = 100  # Presupuesto de evaluación de fitness
-POP_SIZE_BOA = 20
+POP_SIZE_BOA = 20  # Población adecuada para BOA
+
+# Parámetros optimizados de BOA encontrados por irace
+TUNED_BOA_PARAMS = {
+    'sensory_modality': 0.0997,
+    'power_exponent': 0.3619,
+    'switch_prob': 0.6418
+}
 
 # -------------------------------------
 # 3. Función de Evaluación (Fitness)
@@ -61,8 +68,22 @@ def feature_eval(mask, X_train, X_test, y_train, y_test):
     return accuracy_score(y_test, preds)
 
 # -------------------------------------
-# 4. Wrapper functions for imported metaheuristics
+# 4. Wrapper functions for imported metaheuristics with normalized fitness tracking
 # -------------------------------------
+
+def normalize_fitness_history(history):
+    """Normalize fitness history to start from 0 and show relative improvement"""
+    if not history or len(history) == 0:
+        return history
+    
+    # Convert to numpy array for easier manipulation
+    hist_array = np.array(history)
+    initial_fitness = hist_array[0]
+    
+    # Calculate improvement from initial fitness
+    normalized_history = hist_array - initial_fitness
+    
+    return normalized_history.tolist()
 
 def sa_wrapper(X_train, X_test, y_train, y_test, max_evals, **kwargs):
     """Wrapper for simulated annealing"""
@@ -82,28 +103,42 @@ def sa_wrapper(X_train, X_test, y_train, y_test, max_evals, **kwargs):
     )
     best_solution, best_fitness, history = sa.optimize()
     best_mask = np.round(np.clip(best_solution, 0, 1)).astype(int)
-    return best_mask, best_fitness, history
+    
+    # Normalize fitness history to start from 0
+    normalized_history = normalize_fitness_history(history)
+    
+    return best_mask, best_fitness, normalized_history
 
 def hc_wrapper(X_train, X_test, y_train, y_test, max_evals, **kwargs):
     """Wrapper for hill climbing"""
     hc = hill_climbing(max_iter=max_evals, **kwargs)
     best_mask, best_fitness, history = hc.optimize(X_train, y_train)
-    return best_mask, best_fitness, history
+    
+    # Normalize fitness history to start from 0
+    normalized_history = normalize_fitness_history(history)
+    
+    return best_mask, best_fitness, normalized_history
 
 def ts_wrapper(X_train, X_test, y_train, y_test, max_evals, **kwargs):
     """Wrapper for tabu search"""
     ts = tabu_search(max_iter=max_evals, **kwargs)
     best_mask, best_fitness, history = ts.run(X_train, y_train)
-    return best_mask, best_fitness, history
+    
+    # Normalize fitness history to start from 0
+    normalized_history = normalize_fitness_history(history)
+    
+    return best_mask, best_fitness, normalized_history
 
 def boa_wrapper(X_train, X_test, y_train, y_test, max_iter, pop_size, **kwargs):
-    """Wrapper for BOA"""
+    """Wrapper for BOA with optimized parameters from irace tuning"""
     def objective_func(mask):
         # Convert continuous values to binary mask
         binary_mask = np.round(np.clip(mask, 0, 1)).astype(int)
         return feature_eval(binary_mask, X_train, X_test, y_train, y_test)
     
     n_features = X_train.shape[1]
+    
+    # Use tuned parameters instead of defaults
     boa = butterfly_optimization(
         obj_function=objective_func,
         dim=n_features,
@@ -111,12 +146,19 @@ def boa_wrapper(X_train, X_test, y_train, y_test, max_iter, pop_size, **kwargs):
         upper_bound=1.0,
         max_iter=max_iter,
         pop_size=pop_size,
+        sensory_modality=TUNED_BOA_PARAMS['sensory_modality'],
+        power_exponent=TUNED_BOA_PARAMS['power_exponent'],
+        switch_prob=TUNED_BOA_PARAMS['switch_prob'],
         **kwargs
     )
     best_solution, best_fitness = boa.optimize()
     history = boa.get_fitness_history()
     best_mask = np.round(np.clip(best_solution, 0, 1)).astype(int)
-    return best_mask, best_fitness, history
+    
+    # Normalize fitness history to start from 0
+    normalized_history = normalize_fitness_history(history)
+    
+    return best_mask, best_fitness, normalized_history
 
 
 # -------------------------------------
@@ -249,12 +291,12 @@ for name in algorithms.keys():
                      color=colors[name], alpha=0.15)
 
 plt.xlabel("Número de Evaluaciones de Fitness")
-plt.ylabel("Mejor Fitness (Accuracy)")
-plt.title("Convergencia Promedio de Metaheurísticas (+/- Desv. Est.)")
-plt.legend(loc='lower right')
+plt.ylabel("Mejora de Fitness (Relativa al Inicio)")
+plt.title("Evolución de Mejora de Fitness - Todas las Metaheurísticas empiezan en 0")
+plt.legend(loc='upper left')
 plt.grid(True, linestyle="--", alpha=0.7)
 plt.xlim(0, MAX_EVALUATIONS)
-plt.ylim(bottom=0.85) # Ajustar para mejor visualización
+plt.ylim(bottom=0)  # Start from 0 to show relative improvement
 plt.tight_layout()
 plt.show()
 
