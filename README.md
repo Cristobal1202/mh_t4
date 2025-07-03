@@ -28,7 +28,7 @@ Este repositorio implementa y compara algoritmos metaheurísticos para la **sele
 ### 1. Instalación
 ```bash
 # Clonar el repositorio
-git clone <repository-url>
+git clone https://github.com/Cristobal1202/mh_t4
 cd mh_t4
 
 # Instalar dependencias
